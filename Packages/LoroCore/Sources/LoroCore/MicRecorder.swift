@@ -28,6 +28,14 @@ public actor MicRecorder {
     /// Reaperturas del motor en esta grabación, para no quedar en un loop si el audio no se asienta.
     private var restarts = 0
     static let maxRestarts = 8
+    /// Motores reemplazados al reabrir, que todavía no se pueden soltar. Nido se cerró 2 veces el
+    /// 16-oct con audífonos: el watchdog reabría el motor y soltar el viejo justo ahí, con el audio
+    /// cambiando de dispositivo, revienta en `-[AVAudioEngine dealloc]` (DeallocateInputBlock lanza
+    /// una excepción dentro de un destructor C++ y no hay cómo atraparla). Se sueltan unos segundos
+    /// después de `stop()`, con el audio ya asentado.
+    private var retiredEngines: [AVAudioEngine] = []
+    private var releaseTask: Task<Void, Never>?
+    static let releaseDelay: Duration = .seconds(3)
     public private(set) var voiceProcessingError: String?
     public var isVoiceProcessingActive: Bool { engine.inputNode.isVoiceProcessingEnabled }
 
@@ -131,6 +139,7 @@ public actor MicRecorder {
                 guard wanted, !running else { return }
             }
             let engine = AVAudioEngine()
+            retiredEngines.append(self.engine)
             self.engine = engine
             let input = engine.inputNode
             if input.isVoiceProcessingEnabled != voiceIsolation {
@@ -276,10 +285,29 @@ public actor MicRecorder {
             engine.stop()
             // Motor nuevo, sin nodo de entrada: uno detenido sigue enganchado al micrófono y, si
             // es el de un audífono Bluetooth, lo deja pegado en manos libres con la música a 16 kHz.
+            // Si hubo reaperturas, el motor actual puede venir del mismo enredo: se suelta después.
+            if restarts > 0 { retiredEngines.append(engine) }
             engine = AVAudioEngine()
         }
         running = false
         levelHandler = nil
+        scheduleRelease()
         return AudioClip(samples: samples)
+    }
+
+    private func scheduleRelease() {
+        guard !retiredEngines.isEmpty else { return }
+        releaseTask?.cancel()
+        releaseTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.releaseDelay)
+            guard !Task.isCancelled, let self else { return }
+            await self.releaseRetiredEngines()
+        }
+    }
+
+    /// Si ya empezó otra grabación, espera al próximo `stop()`.
+    private func releaseRetiredEngines() {
+        guard !wanted else { return }
+        retiredEngines.removeAll()
     }
 }
