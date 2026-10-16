@@ -101,6 +101,7 @@ public final class MediaPause {
           ObjC.bindFunction('MRMediaRemoteSendCommand', ['bool', ['int', 'id']]);
           if (argv[0] === 'pause' && !$.NSClassFromString('MRNowPlayingRequest').localIsPlaying) return '0';
           $.MRMediaRemoteSendCommand(argv[0] === 'play' ? 0 : 1, $());
+          delay(0.2);  // sin esto osascript puede salir antes de que MediaRemote entregue la orden
           return '1';
         }
         """
