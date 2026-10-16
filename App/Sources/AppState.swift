@@ -49,7 +49,6 @@ final class AppState {
     var scratchText: String = ""
 
     private let hotkey = HotkeyMonitor()
-    private let media = MediaPause()
     /// El pipeline de dictado vive en LoroKit (compartido con Nido). AppState solo lo observa
     /// y decide qué hacer con el texto: pegar, guardar historial, mostrar HUD.
     let session: DictationSession
@@ -197,7 +196,6 @@ final class AppState {
             log.notice("hotkey presionado pero el motor no está listo")
             hud.flash("El motor todavía no está listo"); return
         }
-        media.pause()
         // El HUD aparece al tiro: con el micrófono de un audífono Bluetooth pasan unas décimas
         // antes de que se pueda hablar.
         micStarting = true
@@ -206,7 +204,6 @@ final class AppState {
             let started = await session.start()
             micStarting = false
             guard started else {
-                media.resume()
                 if status == .idle { hud.hide() }
                 return
             }
@@ -218,13 +215,12 @@ final class AppState {
         }
     }
 
-    func cancelRecording() { session.cancel(); media.resume() }
+    func cancelRecording() { session.cancel() }
 
     func finishRecording() {
         guard session.isRecording else { return }
         Task {
             let r = await session.finish()
-            media.resume()
             guard let r else { return }
             deliver(r, paste: settings.pasteAfterTranscribe)
         }

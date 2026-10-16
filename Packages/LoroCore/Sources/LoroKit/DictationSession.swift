@@ -81,6 +81,7 @@ public final class DictationSession {
     public var corrector: () -> DictionaryCorrector
 
     private let recorder = MicRecorder()
+    private let media = MediaPause()
     private let fillerFilter = FillerFilter()
     private let segmenter = SpeechSegmenter()
     private var engines: [EngineKind: any TranscriptionEngine] = [:]
@@ -88,6 +89,7 @@ public final class DictationSession {
     private var previewTask: Task<Void, Never>?
     private var fallbackPrepareTask: Task<Void, Never>?
     private var recordingStart: Date?
+    private var starting = false
     private var committedWords: [String] = []
     private var committedSampleEnd = 0
 
@@ -183,9 +185,17 @@ public final class DictationSession {
             status = .preparing("El motor todavía no está listo")
             return false
         }
+        // Pausar la música y abrir el micrófono toma ~0,3 s con el estado todavía en idle: un
+        // segundo toque entremedio no debe abrir otra grabación encima.
+        guard !starting else { return false }
+        starting = true
+        defer { starting = false }
+        // La música se pausa ANTES de abrir el micrófono: abrir el de un audífono Bluetooth lo pasa
+        // a manos libres, y si la música sigue sonando se escucha como llamada telefónica.
+        await media.pause()
         do {
             try await recorder.start(voiceIsolation: settings().voiceIsolation,
-                                     preferBuiltInMic: !UserDefaults.standard.bool(forKey: Self.bluetoothMicKey)) { [weak self] lvl in
+                                     preferBuiltInMic: UserDefaults.standard.bool(forKey: Self.builtInMicKey)) { [weak self] lvl in
                 Task { @MainActor in self?.onLevel?(lvl) }
             }
             recordingStart = Date()
@@ -196,6 +206,7 @@ public final class DictationSession {
             startPreview()
             return true
         } catch {
+            media.resume()
             status = .error(error.localizedDescription)
             return false
         }
@@ -204,7 +215,7 @@ public final class DictationSession {
     public func cancel() {
         guard status == .recording else { return }
         previewTask?.cancel()
-        Task { _ = await recorder.stop() }
+        Task { _ = await recorder.stop(); media.resume() }
         onLevel?(0)
         resetPreview()
         status = .idle
@@ -216,6 +227,7 @@ public final class DictationSession {
         let started = recordingStart ?? Date()
         previewTask?.cancel()
         let clip = await recorder.stop()
+        media.resume()
         onLevel?(0)
         guard clip.duration >= 0.5 else {
             kitLog.notice("grabación demasiado corta (\(clip.duration, format: .fixed(precision: 2))s), descartada")
@@ -342,9 +354,9 @@ public final class DictationSession {
 
     // MARK: - Utilidades
 
-    /// UserDefaults: true para dictar con el micrófono del audífono Bluetooth (la música se
-    /// degrada mientras se dicta). Por default se usa el del Mac.
-    public static let bluetoothMicKey = "useBluetoothMic"
+    /// UserDefaults: true para dictar con el micrófono del Mac aunque haya audífonos Bluetooth.
+    /// Por default se usa el micrófono conectado (el del audífono, que capta mejor con ruido).
+    public static let builtInMicKey = "preferBuiltInMic"
 
     public static func micModeName(_ m: AVCaptureDevice.MicrophoneMode) -> String {
         switch m {

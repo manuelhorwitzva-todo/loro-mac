@@ -8,8 +8,8 @@ struct SettingsView: View {
     @Environment(AppState.self) private var state
     @State private var appleLocales: [Locale] = []
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
-    @AppStorage(DictationSession.bluetoothMicKey) private var useBluetoothMic = false
-    @AppStorage(MediaPause.defaultsKey) private var pauseMedia = false
+    @AppStorage(DictationSession.builtInMicKey) private var preferBuiltInMic = false
+    @AppStorage(MediaPause.defaultsKey) private var pauseMedia = true
 
     var body: some View {
         @Bindable var state = state
@@ -50,8 +50,8 @@ struct SettingsView: View {
                     Text("Elige “Aislamiento de voz”: macOS filtra ruido y voces lejanas antes de que el audio llegue a Loro.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Toggle("Con audífonos Bluetooth, dictar con el micrófono del audífono", isOn: $useBluetoothMic)
-                Text("Apagado, Loro graba con el micrófono del Mac y la música sigue sonando normal. Encendido, el audífono pasa a modo llamada mientras dictas y el audio se oye peor.")
+                Toggle("Con audífonos Bluetooth, dictar con el micrófono del Mac", isOn: $preferBuiltInMic)
+                Text("Apagado, Loro graba con el micrófono del audífono, que capta mejor con ruido; el audífono pasa a modo llamada mientras dictas, por eso conviene pausar la música. Encendido, la música puede seguir sonando normal.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

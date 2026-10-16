@@ -59,11 +59,11 @@ public actor MicRecorder {
     static let startAttempts = 6
     static let retryDelay: Duration = .milliseconds(200)
 
-    /// `preferBuiltInMic`: con audífonos Bluetooth, graba con el micrófono del Mac. Abrir el
-    /// del audífono lo saca de A2DP y lo deja en manos libres (HFP, 16 kHz mono): la música
-    /// suena a llamada telefónica y el cambio de modo corta el motor (12-oct, soundcore
-    /// Liberty 5 y WH-1000XM6).
-    public func start(voiceIsolation: Bool = true, preferBuiltInMic: Bool = true,
+    /// `preferBuiltInMic`: con audífonos Bluetooth, graba con el micrófono del Mac en vez del
+    /// audífono. Abrir el del audífono lo deja en manos libres (24 kHz con AirPods Pro): la música
+    /// suena a llamada telefónica mientras se dicta. Por default se usa el micrófono que esté
+    /// conectado y la música se pausa (`MediaPause`, 16-oct).
+    public func start(voiceIsolation: Bool = true, preferBuiltInMic: Bool = false,
                       onLevel: (@Sendable (Float) -> Void)? = nil) async throws {
         guard !running, !wanted else { return }
         samples.removeAll(keepingCapacity: true)
@@ -104,34 +104,17 @@ public actor MicRecorder {
         }
     }
 
-    /// Graba de un dispositivo con un IOProc de CoreAudio, sin AVAudioEngine: el micrófono del Mac
-    /// cuando hay audífonos Bluetooth, o el del audífono si se pidió. Con el del audífono, éste pasa
-    /// a manos libres y cambia de formato; AVAudioEngine se detiene con ese cambio y reabrirlo saca
+    /// Graba de un dispositivo con un IOProc de CoreAudio, sin AVAudioEngine: el micrófono del
+    /// audífono Bluetooth, o el del Mac cuando se pide. Al abrir su micrófono el audífono pasa a
+    /// manos libres y cambia de formato; AVAudioEngine se detiene con ese cambio y reabrirlo saca
     /// al audífono de manos libres y lo vuelve a meter: 1,2 a 1,7 s sin grabar (12-oct, WH-1000XM6).
-    /// El IOProc sigue corriendo durante el cambio y entrega audio a los ~0,3 s. false si no se
+    /// El IOProc sigue corriendo durante el cambio y entrega audio a los ~0,1 s. false si no se
     /// pudo, para caer al motor de siempre.
     private func openDevice(_ device: AudioDeviceID) -> Bool {
-        let target = AudioClip.canonicalFormat
-        guard var description = InputDevices.inputFormat(of: device),
-              let format = AVAudioFormat(streamDescription: &description),
-              let converter = AVAudioConverter(from: format, to: target) else { return false }
-        let ratio = target.sampleRate / format.sampleRate
-        // Un solo conversor para toda la grabación: los buffers del IOProc son de ~10 ms y uno
-        // nuevo por buffer reinicia el filtro en cada borde.
+        let converter = StreamConverter(device: device)
         var proc: AudioDeviceIOProcID?
         let created = AudioDeviceCreateIOProcIDWithBlock(&proc, device, halQueue) { [weak self] _, input, _, _, _ in
-            guard let self, let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input),
-                  let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64)
-            else { return }
-            var fed = false
-            _ = converter.convert(to: out, error: nil) { _, status in
-                if fed { status.pointee = .noDataNow; return nil }
-                fed = true
-                status.pointee = .haveData
-                return buffer
-            }
-            guard out.frameLength > 0, let data = out.floatChannelData else { return }
-            let clip = AudioClip(samples: Array(UnsafeBufferPointer(start: data[0], count: Int(out.frameLength))))
+            guard let self, let clip = converter.convert(input) else { return }
             let samples = clip.samples
             let level = clip.rms
             Task { await self.append(samples, level: level) }
@@ -334,5 +317,52 @@ public actor MicRecorder {
     private func releaseRetiredEngines() {
         guard !wanted else { return }
         retiredEngines.removeAll()
+    }
+}
+
+/// Convierte lo que entrega el IOProc al formato canónico, siguiendo los cambios de formato del
+/// dispositivo. Un audífono Bluetooth cambia de 48 a 24 kHz apenas se abre su micrófono, ya con el
+/// IOProc corriendo: con el formato leído al abrir, el audio de 24 kHz se leía como de 48 y la
+/// grabación quedaba a la mitad de duración y acelerada (16-oct, AirPods Pro: 5 s → 2,5 s).
+/// Se usa siempre desde la misma cola del IOProc, así que no necesita locks.
+private final class StreamConverter: @unchecked Sendable {
+    private let device: AudioDeviceID
+    private var description = AudioStreamBasicDescription()
+    private var format: AVAudioFormat?
+    /// Uno por formato y no uno por buffer: los buffers son de ~10 ms y un conversor nuevo
+    /// reinicia el filtro en cada borde.
+    private var converter: AVAudioConverter?
+
+    init(device: AudioDeviceID) { self.device = device }
+
+    func convert(_ input: UnsafePointer<AudioBufferList>) -> AudioClip? {
+        guard var current = InputDevices.inputFormat(of: device) else { return nil }
+        if format == nil || !Self.same(current, description) {
+            guard let f = AVAudioFormat(streamDescription: &current),
+                  let c = AVAudioConverter(from: f, to: AudioClip.canonicalFormat) else { return nil }
+            if format != nil {
+                micLog.notice("el micrófono cambió de formato: \(Int(self.description.mSampleRate), privacy: .public) → \(Int(current.mSampleRate), privacy: .public) Hz")
+            }
+            description = current; format = f; converter = c
+        }
+        guard let format, let converter,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input), buffer.frameLength > 0,
+              let out = AVAudioPCMBuffer(pcmFormat: AudioClip.canonicalFormat,
+                                         frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * AudioClip.sampleRate / format.sampleRate) + 64)
+        else { return nil }
+        var fed = false
+        _ = converter.convert(to: out, error: nil) { _, status in
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard out.frameLength > 0, let data = out.floatChannelData else { return nil }
+        return AudioClip(samples: Array(UnsafeBufferPointer(start: data[0], count: Int(out.frameLength))))
+    }
+
+    private static func same(_ a: AudioStreamBasicDescription, _ b: AudioStreamBasicDescription) -> Bool {
+        a.mSampleRate == b.mSampleRate && a.mChannelsPerFrame == b.mChannelsPerFrame
+            && a.mBytesPerFrame == b.mBytesPerFrame && a.mFormatFlags == b.mFormatFlags && a.mFormatID == b.mFormatID
     }
 }
