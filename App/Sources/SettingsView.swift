@@ -9,7 +9,7 @@ struct SettingsView: View {
     @State private var appleLocales: [Locale] = []
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage(DictationSession.bluetoothMicKey) private var useBluetoothMic = false
-    @AppStorage(MediaPause.defaultsKey) private var pauseMedia = true
+    @AppStorage(MediaPause.defaultsKey) private var pauseMedia = false
 
     var body: some View {
         @Bindable var state = state

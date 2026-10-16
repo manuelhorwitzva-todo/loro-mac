@@ -11,7 +11,9 @@ import Foundation
 @MainActor
 final class MediaPause {
     static let defaultsKey = "pauseMedia"
-    static var enabled: Bool { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
+    /// Apagado por default: la música sigue sonando al dictar (16-oct). El micrófono del Mac no
+    /// toca el audífono, así que no hay nada que proteger pausando.
+    static var enabled: Bool { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? false }
 
     /// Cola de órdenes: el valor es true si Loro dejó algo en pausa. Encadenadas para que un
     /// dictado corto no mande el "play" antes de que termine el "pause".

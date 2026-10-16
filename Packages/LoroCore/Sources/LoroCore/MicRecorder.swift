@@ -18,7 +18,7 @@ public actor MicRecorder {
     private var wanted = false
     private var levelHandler: (@Sendable (Float) -> Void)?
     private var voiceIsolation = true
-    /// Captura directa del micrófono de un audífono Bluetooth (ver `openBluetooth`).
+    /// Captura directa de un dispositivo con un IOProc de CoreAudio, sin AVAudioEngine (ver `openDevice`).
     private var hal: (device: AudioDeviceID, proc: AudioDeviceIOProcID)?
     private let halQueue = DispatchQueue(label: "cl.manulit0.loro.mic.bluetooth")
     /// Entrada del sistema que había antes de pasarnos al micrófono del Mac, para reponerla.
@@ -71,6 +71,15 @@ public actor MicRecorder {
         self.voiceIsolation = voiceIsolation
         restarts = 0
         wanted = true
+        // Con audífonos Bluetooth, el micrófono del Mac se abre directo, sin cambiar la entrada del
+        // sistema ni pasar por AVAudioEngine. Cambiar la entrada y reponerla al terminar alcanzaba a
+        // abrir el micrófono del audífono un instante, y eso lo pasa a manos libres: la música
+        // sonaba como llamada al dictar o al volver (16-oct, AirPods Pro). Así el audífono no se toca.
+        if preferBuiltInMic, !voiceIsolation, let builtIn = InputDevices.builtInMicIfBluetoothDefault(),
+           openDevice(builtIn) {
+            micLog.info("audífono Bluetooth: se graba directo con el micrófono del Mac")
+            return
+        }
         if preferBuiltInMic, previousInput == nil {
             previousInput = InputDevices.switchToBuiltInMicIfBluetooth()
             if previousInput != nil {
@@ -81,7 +90,7 @@ public actor MicRecorder {
             }
         }
         let bluetooth = InputDevices.bluetoothDefaultInput()
-        if !voiceIsolation, let bluetooth, openBluetooth(bluetooth) {
+        if !voiceIsolation, let bluetooth, openDevice(bluetooth) {
             micLog.info("audífono Bluetooth: captura directa")
         } else {
             do { try await openEngine() } catch { wanted = false; restoreInput(); throw error }
@@ -95,18 +104,34 @@ public actor MicRecorder {
         }
     }
 
-    /// Graba del audífono Bluetooth con un IOProc de CoreAudio, sin AVAudioEngine. Al abrir su
-    /// micrófono el audífono pasa a manos libres y cambia de formato; AVAudioEngine se detiene
-    /// con ese cambio y reabrirlo saca al audífono de manos libres y lo vuelve a meter: 1,2 a
-    /// 1,7 s sin grabar (12-oct, WH-1000XM6). El IOProc sigue corriendo durante el cambio y
-    /// entrega audio a los ~0,3 s. false si no se pudo, para caer al motor de siempre.
-    private func openBluetooth(_ device: AudioDeviceID) -> Bool {
+    /// Graba de un dispositivo con un IOProc de CoreAudio, sin AVAudioEngine: el micrófono del Mac
+    /// cuando hay audífonos Bluetooth, o el del audífono si se pidió. Con el del audífono, éste pasa
+    /// a manos libres y cambia de formato; AVAudioEngine se detiene con ese cambio y reabrirlo saca
+    /// al audífono de manos libres y lo vuelve a meter: 1,2 a 1,7 s sin grabar (12-oct, WH-1000XM6).
+    /// El IOProc sigue corriendo durante el cambio y entrega audio a los ~0,3 s. false si no se
+    /// pudo, para caer al motor de siempre.
+    private func openDevice(_ device: AudioDeviceID) -> Bool {
+        let target = AudioClip.canonicalFormat
         guard var description = InputDevices.inputFormat(of: device),
-              let format = AVAudioFormat(streamDescription: &description) else { return false }
+              let format = AVAudioFormat(streamDescription: &description),
+              let converter = AVAudioConverter(from: format, to: target) else { return false }
+        let ratio = target.sampleRate / format.sampleRate
+        // Un solo conversor para toda la grabación: los buffers del IOProc son de ~10 ms y uno
+        // nuevo por buffer reinicia el filtro en cada borde.
         var proc: AudioDeviceIOProcID?
         let created = AudioDeviceCreateIOProcIDWithBlock(&proc, device, halQueue) { [weak self] _, input, _, _, _ in
             guard let self, let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input),
-                  let clip = try? AudioClip.resample(buffer) else { return }
+                  let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64)
+            else { return }
+            var fed = false
+            _ = converter.convert(to: out, error: nil) { _, status in
+                if fed { status.pointee = .noDataNow; return nil }
+                fed = true
+                status.pointee = .haveData
+                return buffer
+            }
+            guard out.frameLength > 0, let data = out.floatChannelData else { return }
+            let clip = AudioClip(samples: Array(UnsafeBufferPointer(start: data[0], count: Int(out.frameLength))))
             let samples = clip.samples
             let level = clip.rms
             Task { await self.append(samples, level: level) }

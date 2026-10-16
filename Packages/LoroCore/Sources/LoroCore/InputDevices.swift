@@ -25,6 +25,13 @@ enum InputDevices {
         _ = setDefaultInput(previous)
     }
 
+    /// El micrófono integrado del Mac, si la entrada por defecto es un audífono Bluetooth. No
+    /// cambia nada del sistema: sirve para grabar del Mac sin abrir nunca el audífono.
+    static func builtInMicIfBluetoothDefault() -> AudioDeviceID? {
+        guard let current = defaultInput(), isBluetooth(current) else { return nil }
+        return all().first(where: { transport($0) == kAudioDeviceTransportTypeBuiltIn && hasInput($0) })
+    }
+
     /// La entrada por defecto, solo si es un audífono Bluetooth.
     static func bluetoothDefaultInput() -> AudioDeviceID? {
         defaultInput().flatMap { isBluetooth($0) ? $0 : nil }
