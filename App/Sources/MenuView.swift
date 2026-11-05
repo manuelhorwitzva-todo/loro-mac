@@ -14,6 +14,8 @@ struct MenuView: View {
             header
             Divider().padding(.vertical, 8)
             if !state.hasAccessibility { permissionBanner }
+            MeetingSection()
+            Divider().padding(.vertical, 8)
             historySection
             Divider().padding(.vertical, 8)
             footer

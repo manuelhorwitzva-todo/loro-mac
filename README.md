@@ -31,6 +31,21 @@ La primera vez:
 Después: mantén **⌥ Option derecho**, habla, suelta. `Esc` cancela. Todo se cambia en Ajustes.
 La ventana principal se abre desde el lorito de la barra o abriendo Loro de nuevo (Spotlight).
 
+## Grabar reuniones
+
+En el menú del lorito, **Grabar reunión** graba dos pistas separadas: tu micrófono (tú) y el audio
+que sale del navegador o la app de la llamada (los demás). La música y las notificaciones no quedan.
+Un indicador rojo queda visible mientras graba; avisa a los demás que estás grabando.
+
+Al terminar quedan en `~/Library/Application Support/Loro/Reuniones/<fecha hora>/`: `tu.m4a`,
+`otros.m4a`, `reunion.m4a` (las dos juntas) y `transcripcion.md` (transcrita en este Mac, con quién
+dijo qué según la pista). En Ajustes se puede poner un comando que se corre al terminar, con las rutas en
+variables `LORO_MEETING_*`, para mandar la reunión a otro sistema.
+
+La primera vez macOS pide **Grabación de audio del sistema**. Sin ese permiso no hay error: la pista de
+los demás queda en silencio, y Loro avisa si a los 45 s no llega nada. También se puede empezar o parar
+desde un script: `cl.manulit0.loro.meeting.toggle` como notificación distribuida.
+
 ## Diccionario
 
 Ningún motor acepta vocabulario propio de forma confiable, así que el diccionario es una pasada de
@@ -52,6 +67,9 @@ Packages/LoroCore/          Swift Package, sin UI. Se prueba desde la terminal.
   LanguageDrift.swift       Detecta cuando Parakeet se desvía al inglés/italiano → Whisper.
   Dictionary.swift          Diccionario personal: nombres y correcciones, post-transcripción.
   SpeechSegmenter.swift     Detector de pausas para el preview en vivo.
+  SystemAudioCapture.swift  Core Audio tap: el audio que sale del navegador, sin drivers virtuales.
+  MeetingRecorder.swift     Reunión en dos pistas (mic + navegador) escritas a disco mientras graba.
+  MeetingTranscriber.swift  Turnos de habla por pista → transcripción con quién dijo qué.
   Sources/loro/             CLI: `loro transcribe`, `loro bench`, `loro preview`.
 App/                        La app de barra de menú (SwiftUI + AppKit donde hace falta).
   AppState.swift            Estado central: motores, grabación, historial, cola de archivos.

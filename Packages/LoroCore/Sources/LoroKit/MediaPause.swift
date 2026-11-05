@@ -15,6 +15,9 @@ private let mediaLog = Logger(subsystem: "cl.manulit0.loro", category: "media")
 public final class MediaPause {
     public static let defaultsKey = "pauseMedia"
     public static var enabled: Bool { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
+    /// true mientras se graba una reunión: un dictado en plena llamada no debe mandarle
+    /// "pausa" a Chrome (pausaría el video de Meet o lo que esté sonando en la llamada).
+    nonisolated(unsafe) public static var meetingInProgress = false
 
     /// Loro dejó algo en pausa y le toca reanudarlo.
     private var owned = false
@@ -28,7 +31,7 @@ public final class MediaPause {
     /// Pausa y espera a que la orden se haya aplicado, para abrir el micrófono con la música ya
     /// detenida. ~0,2 s con osascript.
     public func pause() async {
-        guard Self.enabled else { return }
+        guard Self.enabled, !Self.meetingInProgress else { return }
         if let resuming {
             // Dictado nuevo mientras se esperaba para reanudar: la música sigue en pausa, se deja así.
             resuming.cancel()

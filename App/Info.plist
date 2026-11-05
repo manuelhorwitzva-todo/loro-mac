@@ -31,6 +31,8 @@
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Loro graba el audio de tus reuniones (lo que dicen los demás en la llamada) solo cuando aprietas Grabar reunión. Se guarda en este Mac.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Manuel Horwitz</string>
 	<key>NSMicrophoneUsageDescription</key>

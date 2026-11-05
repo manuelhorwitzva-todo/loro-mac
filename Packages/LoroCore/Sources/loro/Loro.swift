@@ -7,7 +7,7 @@ struct Loro: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "loro",
         abstract: "Loro: dictado y transcripción 100% local.",
-        subcommands: [Transcribe.self, Bench.self, Preview.self],
+        subcommands: [Transcribe.self, Bench.self, Preview.self, Meeting.self, MeetingTranscript.self, AudioApps.self],
         defaultSubcommand: Transcribe.self
     )
 }
@@ -154,5 +154,56 @@ struct Preview: AsyncParsableCommand {
             if avail >= clip.samples.count { break }
         }
         print("\nCONGELADO: \(committedWords.joined(separator: " "))\nVOLÁTIL: \(liveVolatile)")
+    }
+}
+
+struct AudioApps: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "audio-apps", abstract: "Lista las apps con audio abierto (para saber cuál capturar).")
+    func run() async throws {
+        print("permiso audio del sistema: \(SystemAudioPermission.state)")
+        for p in SystemAudioCapture.audioProcesses() { print("\(p.output ? "▶︎" : " ") \(p.bundleID)") }
+    }
+}
+
+struct Meeting: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Graba una reunión (micrófono + navegador) por N segundos.")
+    @Option(name: .shortAndLong, help: "Segundos a grabar") var seconds: Double = 20
+    @Option(name: .shortAndLong, help: "Carpeta de salida") var out: String
+    @Flag(help: "Grabar todo el audio del Mac, no solo el navegador") var all = false
+
+    func run() async throws {
+        let rec = try MeetingRecorder(folder: URL(fileURLWithPath: out))
+        try rec.start(bundleIDs: all ? [] : SystemAudioCapture.meetingBundleIDs)
+        let t0 = Date()
+        while Date().timeIntervalSince(t0) < seconds {
+            try await Task.sleep(for: .seconds(1))
+            let l = rec.levels
+            FileHandle.standardError.write(String(format: "  %4.0fs  mic %.4f  otros %.4f\n", Date().timeIntervalSince(t0), l.mic, l.system).data(using: .utf8)!)
+        }
+        let r = try await rec.stop()
+        print("guardado en \(r.folder.path)")
+        print(String(format: "duración %.1fs · señal mic %.1fs · señal otros %.1fs", r.duration, r.micSignalSeconds, r.systemSignalSeconds))
+    }
+}
+
+struct MeetingTranscript: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "meeting-transcript", abstract: "Transcribe una reunión grabada (tu.caf + otros.caf).")
+    @Argument(help: "Carpeta de la reunión") var folder: String
+    @Option(name: .shortAndLong, help: "whisper | parakeet | apple") var engine: EngineOption = EngineOption(argument: "whisper")!
+
+    func run() async throws {
+        let dir = URL(fileURLWithPath: folder)
+        let eng = makeEngine(engine.kind, locale: "es_CL", model: nil)
+        try await prepare(eng)
+        let t0 = Date()
+        func track(_ n: String) -> URL {
+            let caf = dir.appendingPathComponent("\(n).caf")
+            return FileManager.default.fileExists(atPath: caf.path) ? caf : dir.appendingPathComponent("\(n).m4a")
+        }
+        let turns = try await MeetingTranscriber().transcribe(
+            mic: track("tu"), system: track("otros"),
+            transcribe: { clip in try? await eng.transcribe(clip).text })
+        print(MeetingTranscriber.markdown(turns, title: "Reunión", started: t0, duration: 0, meName: "Tú", engine: engine.kind.rawValue))
+        FileHandle.standardError.write("  (\(String(format: "%.1f", Date().timeIntervalSince(t0)))s)\n".data(using: .utf8)!)
     }
 }

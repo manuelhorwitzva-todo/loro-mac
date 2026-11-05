@@ -46,6 +46,7 @@ targets:
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         NSMicrophoneUsageDescription: Loro necesita el micrófono para transcribir lo que dictas. Todo se procesa en este Mac.
+        NSAudioCaptureUsageDescription: Loro graba el audio de tus reuniones (lo que dicen los demás en la llamada) solo cuando aprietas Grabar reunión. Se guarda en este Mac.
         NSSpeechRecognitionUsageDescription: Loro usa el reconocimiento de voz de Apple como uno de sus motores locales.
         NSHumanReadableCopyright: © 2026 Manuel Horwitz
     entitlements:

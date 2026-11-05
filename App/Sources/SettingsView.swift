@@ -110,6 +110,7 @@ struct SettingsView: View {
                     Button("Mostrar en Finder") { NSWorkspace.shared.activateFileViewerSelecting([ModelStore.root]) }
                 }
             }
+            MeetingSettingsView()
         }
         .formStyle(.grouped)
         .frame(width: 520, height: 720)

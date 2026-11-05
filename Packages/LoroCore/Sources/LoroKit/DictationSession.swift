@@ -303,6 +303,23 @@ public final class DictationSession {
         return (afterFiller, stages)
     }
 
+    /// Transcribe un trozo de una reunión con el motor elegido (y el rescate de Whisper si
+    /// Parakeet se desvía de idioma), pasando por diccionario y muletillas. A diferencia de
+    /// `transcribe`, no toca el estado: una reunión son cientos de trozos y no debe prender el
+    /// HUD de dictado ni bloquear un dictado que se haga mientras tanto.
+    public func transcribeSegment(_ clip: AudioClip) async -> String? {
+        let s = settings()
+        let corrector = corrector()
+        let e = engine(for: s.engine)
+        guard (try? await e.prepare { _ in }) != nil, var raw = try? await e.transcribe(clip).text else { return nil }
+        if s.engine == .parakeet, !raw.isEmpty, LanguageDrift.drifted(raw) {
+            let w = engine(for: .whisper)
+            if (try? await w.prepare { _ in }) != nil, let t2 = try? await w.transcribe(clip), !t2.text.isEmpty { raw = t2.text }
+        }
+        let afterDictionary = corrector.apply(raw)
+        return s.fillerFilter ? fillerFilter.apply(afterDictionary) : afterDictionary
+    }
+
     // MARK: - Preview en vivo
 
     /// Cada ~0.45 s: si apareció una pausa, congela ese trozo (se transcribe UNA vez y no

@@ -52,6 +52,8 @@ final class AppState {
     /// El pipeline de dictado vive en LoroKit (compartido con Nido). AppState solo lo observa
     /// y decide qué hacer con el texto: pegar, guardar historial, mostrar HUD.
     let session: DictationSession
+    /// Grabar reunión (micrófono + audio del navegador).
+    let meeting: MeetingController
     /// Si la tecla ya se soltó mientras el micrófono todavía arrancaba, cerramos al tiro.
     private var hotkeyIsDown = false
     private var hotkeyPressedAt = Date.distantPast
@@ -64,7 +66,9 @@ final class AppState {
     private init() {
         let initial = LoroSettings.load()
         settings = initial
-        session = DictationSession(settings: { initial }, corrector: { DictionaryCorrector(entries: []) })
+        let dictation = DictationSession(settings: { initial }, corrector: { DictionaryCorrector(entries: []) })
+        session = dictation
+        meeting = MeetingController(session: dictation)
         session.settings = { [unowned self] in self.settings }
         session.corrector = { [unowned self] in self.corrector }
         session.onStatus = { [weak self] st in
