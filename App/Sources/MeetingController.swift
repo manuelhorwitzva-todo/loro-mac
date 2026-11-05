@@ -47,9 +47,11 @@ final class MeetingController {
     init(session: DictationSession) {
         self.session = session
         MeetingStore.prune(days: settings.keepDays)
-        // Para automatizar (Atajos, un script, una futura detección de llamadas) sin abrir el menú.
-        DistributedNotificationCenter.default().addObserver(forName: .init("cl.manulit0.loro.meeting.toggle"), object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.toggle() }
+        // Desde afuera (un script, Atajos) solo se puede TERMINAR una reunión, nunca empezarla:
+        // cualquier proceso del Mac puede mandar una notificación distribuida, y empezar a grabar
+        // usaría los permisos de micrófono y audio del sistema que el usuario le dio a Loro.
+        DistributedNotificationCenter.default().addObserver(forName: .init("cl.manulit0.loro.meeting.stop"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stop() }
         }
         Task { await recoverInterrupted() }
     }

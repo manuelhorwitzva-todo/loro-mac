@@ -43,8 +43,9 @@ dijo qué según la pista). En Ajustes se puede poner un comando que se corre al
 variables `LORO_MEETING_*`, para mandar la reunión a otro sistema.
 
 La primera vez macOS pide **Grabación de audio del sistema**. Sin ese permiso no hay error: la pista de
-los demás queda en silencio, y Loro avisa si a los 45 s no llega nada. También se puede empezar o parar
-desde un script: `cl.manulit0.loro.meeting.toggle` como notificación distribuida.
+los demás queda en silencio, y Loro avisa si a los 45 s no llega nada. Desde un script se puede terminar una
+grabación (`cl.manulit0.loro.meeting.stop` como notificación distribuida), pero no empezarla: eso
+queda siempre en manos de quien usa el Mac.
 
 ## Diccionario
 
