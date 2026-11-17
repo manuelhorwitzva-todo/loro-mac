@@ -57,6 +57,7 @@ final class AppState {
     /// Si la tecla ya se soltó mientras el micrófono todavía arrancaba, cerramos al tiro.
     private var hotkeyIsDown = false
     private var hotkeyPressedAt = Date.distantPast
+    private var hotkeyReleasedAt = Date.distantPast
     /// Modo híbrido: la grabación la abrió un toque corto, así que la cierra el próximo toque.
     private var recordingStartedByTap = false
     /// Entre que se aprieta el atajo y el micrófono empieza a entregar audio.
@@ -75,10 +76,9 @@ final class AppState {
             guard let self else { return }
             status = st
             switch st {
-            case .recording, .transcribing: hud.show()
-            case .idle: hud.hide()
-            case .error(let e): hud.flash(e)
-            case .preparing(let m): if hud.isVisible { hud.flash(m) }
+            case .error(let e): flash(e)
+            case .preparing(let m): if hudVisible { flash(m) }
+            default: break   // grabando, transcribiendo y reposo: el HUD se deriva solo (`hudVisible`)
             }
         }
         session.onEnginePhase = { [weak self] p in self?.enginePhase = p }
@@ -88,6 +88,41 @@ final class AppState {
             liveCommitted = c; liveVolatile = v
             liveText = v.isEmpty ? c : (c.isEmpty ? v : c + " " + v)
         }
+        hud.attach(to: self)
+    }
+
+    // MARK: - HUD
+
+    /// Aviso pasajero del HUD ("Reunión guardada", un error…). Se borra solo.
+    private(set) var hudMessage: String?
+    private var hudMessageTask: Task<Void, Never>?
+
+    /// Muestra un aviso unos segundos. No esconde nada: si hay un dictado grabándose o esperando
+    /// Enter, la cajita sigue ahí cuando el aviso se va.
+    func flash(_ message: String, for duration: Duration = .seconds(2.5)) {
+        hudMessageTask?.cancel()
+        hudMessage = message
+        hudMessageTask = Task { [weak self] in
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled else { return }
+            self?.hudMessage = nil
+        }
+    }
+
+    /// La cajita se ve si y solo si hay algo que mostrar. Es la única regla.
+    var hudVisible: Bool {
+        HUDRule.visible(micStarting: micStarting, status: status, pending: pendingText != nil, message: hudMessage != nil)
+    }
+
+    /// Por qué está (o no) visible, para el log.
+    var hudReason: String {
+        var r: [String] = []
+        if micStarting { r.append("abriendo micrófono") }
+        if status == .recording { r.append("grabando") }
+        if status == .transcribing { r.append("transcribiendo") }
+        if pendingText != nil { r.append("esperando Enter") }
+        if let m = hudMessage { r.append("aviso: \(m)") }
+        return r.isEmpty ? "nada que mostrar" : r.joined(separator: ", ")
     }
 
     // MARK: - Arranque
@@ -156,16 +191,17 @@ final class AppState {
         hotkeyIsDown = true
         hotkeyPressedAt = Date()
         switch settings.hotkeyMode {
-        case .pushToTalk: startRecording()
-        case .toggle: status == .recording ? finishRecording() : startRecording()
+        case .pushToTalk: startRecording(fromHotkey: true)
+        case .toggle: status == .recording ? finishRecording() : startRecording(fromHotkey: true)
         case .hybrid:
             if status == .recording { finishRecording() }   // segundo toque cierra
-            else { recordingStartedByTap = false; startRecording() }
+            else { recordingStartedByTap = false; startRecording(fromHotkey: true) }
         }
     }
 
     private func hotkeyReleased() {
         hotkeyIsDown = false
+        hotkeyReleasedAt = Date()
         switch settings.hotkeyMode {
         case .pushToTalk: finishRecording()
         case .toggle: break
@@ -182,7 +218,6 @@ final class AppState {
     func confirmPending() {
         guard let text = pendingText else { return }
         pendingText = nil
-        hud.hide()
         let outcome = Paster.insert(text, allowPaste: hasAccessibility)
         log.info("texto confirmado con Enter, entregado vía \(String(describing: outcome), privacy: .public)")
         if settings.playSounds { NSSound(named: "Tink")?.play() }
@@ -191,31 +226,49 @@ final class AppState {
     /// Esc: no pega. El texto sigue en el portapapeles para un ⌘V manual.
     func discardPending() {
         pendingText = nil
-        hud.hide()
     }
 
-    func startRecording() {
+    /// `fromHotkey`: false cuando parte del botón del menú, donde no hay tecla que soltar.
+    func startRecording(fromHotkey: Bool = false) {
+        // Otro toque mientras el micrófono todavía abre, o mientras se transcribe: no hay nada
+        // que empezar. Antes ese segundo intento fallaba y de paso escondía la cajita del primero.
+        guard !micStarting, status != .recording, status != .transcribing else {
+            log.notice("hotkey ignorado: ya hay un dictado en curso (\(self.hudReason, privacy: .public))")
+            return
+        }
         if pendingText != nil { discardPending() }
         guard enginePhase == .ready else {
             log.notice("hotkey presionado pero el motor no está listo")
-            hud.flash("El motor todavía no está listo"); return
+            flash("El motor todavía no está listo"); return
         }
-        // El HUD aparece al tiro: con el micrófono de un audífono Bluetooth pasan unas décimas
-        // antes de que se pueda hablar.
+        // El HUD aparece al tiro (`micStarting` lo prende): con el micrófono de un audífono
+        // Bluetooth pasan unas décimas antes de que se pueda hablar.
         micStarting = true
-        hud.show()
         Task {
             let started = await session.start()
             micStarting = false
             guard started else {
-                if status == .idle { hud.hide() }
+                log.notice("el micrófono no partió (estado: \(self.status.label, privacy: .public))")
+                // El mismo error dos veces seguidas no vuelve a avisar por `onStatus` (el estado
+                // no cambia), así que se avisa acá: si no, la cajita se iría sin decir nada.
+                if case .error(let e) = status { flash(e) }
                 return
             }
             if settings.playSounds { NSSound(named: "Pop")?.play() }
             // Toque más corto que el arranque del mic: la soltada ya pasó, cerramos ahora.
-            // (En híbrido, una soltada rápida es un tap: se sigue grabando.)
             if settings.hotkeyMode == .pushToTalk, !hotkeyIsDown { finishRecording() }
-            if settings.hotkeyMode == .hybrid, !hotkeyIsDown { recordingStartedByTap = true }
+            // En híbrido depende de cuánto estuvo apretada: un toque corto sigue grabando; una
+            // presión larga que ya se soltó se cierra (si no, quedaba pegado en "Escuchando…").
+            if settings.hotkeyMode == .hybrid, !hotkeyIsDown {
+                // Desde el botón del menú no hay tecla: queda grabando hasta el próximo toque.
+                guard fromHotkey else { recordingStartedByTap = true; return }
+                let held = hotkeyReleasedAt.timeIntervalSince(hotkeyPressedAt)
+                if HUDRule.keepsRecordingAfterEarlyRelease(heldFor: held) { recordingStartedByTap = true }
+                else {
+                    log.notice("tecla soltada tras \(held, format: .fixed(precision: 2))s, antes de que abriera el micrófono: se cierra")
+                    finishRecording()
+                }
+            }
         }
     }
 
@@ -250,16 +303,16 @@ final class AppState {
         Task {
             defer { retranscribing.remove(item.id) }
             guard let clip = try? AudioClip.load(url: url) else {
-                hud.flash("No se pudo abrir el audio"); return
+                flash("No se pudo abrir el audio"); return
             }
             guard let r = await session.retranscribe(clip, with: .whisper) else {
-                hud.flash("Whisper no sacó texto de ese audio"); return
+                flash("Whisper no sacó texto de ese audio"); return
             }
             HistoryStore.updateText(id: item.id, text: r.text, engine: .whisper, stages: r.stages)
             reloadHistory()
             Paster.copyOnly(r.text)
             lastTranscript = r.text
-            hud.flash("Re-transcrito con Whisper y copiado")
+            flash("Re-transcrito con Whisper y copiado")
         }
     }
 
@@ -290,7 +343,6 @@ final class AppState {
         if paste, settings.confirmWithEnter, r.source == "Dictado" {
             Paster.copyOnly(text)
             pendingText = text
-            hud.show()
             if settings.playSounds { NSSound(named: "Pop")?.play() }
         } else if paste {
             let outcome = Paster.insert(text, allowPaste: hasAccessibility)
@@ -298,6 +350,23 @@ final class AppState {
             if settings.playSounds { NSSound(named: "Tink")?.play() }
         }
     }
+
+    // MARK: - Modo de prueba (HUDDemo): mueve solo lo que el HUD dibuja
+
+    func demoRecording(_ on: Bool) {
+        status = on ? .recording : .idle
+        level = on ? 0.06 : 0
+        if !on { demoLive(committed: "", volatile: "") }
+    }
+    func demoLive(committed c: String, volatile v: String) {
+        liveCommitted = c; liveVolatile = v
+        liveText = v.isEmpty ? c : (c.isEmpty ? v : c + " " + v)
+    }
+    func demoPending(_ text: String?) {
+        pendingText = text
+    }
+    func demoFlash(_ m: String) { flash(m) }
+    func demoMicStarting(_ on: Bool) { micStarting = on }
 
     // MARK: - Modo de micrófono del sistema
 
@@ -315,7 +384,7 @@ final class AppState {
                 try? await Task.sleep(for: .seconds(30))
                 endMicModeSelection()
             } catch {
-                hud.flash(error.localizedDescription)
+                flash(error.localizedDescription)
             }
         }
     }

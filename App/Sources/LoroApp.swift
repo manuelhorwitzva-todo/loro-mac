@@ -29,7 +29,9 @@ struct LoroApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Task { @MainActor in await AppState.shared.boot() }
+        Task { @MainActor in
+            if let dir = HUDDemo.folder { await HUDDemo.run(into: dir) } else { await AppState.shared.boot() }
+        }
     }
 
     /// La app no tiene Dock ni ventana principal: si el usuario la abre de nuevo desde
