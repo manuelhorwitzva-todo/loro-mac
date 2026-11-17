@@ -2,6 +2,28 @@ import LoroKit
 import AppKit
 import SwiftUI
 
+/// Cuándo se ve el HUD y qué dice. Funciones puras: el HUD se DERIVA del estado, nadie lo
+/// prende ni lo apaga a mano. Antes había una docena de `show()`/`hide()` repartidos y un aviso
+/// de 2,5 s podía esconder la cajita con un dictado todavía esperando Enter.
+enum HUDRule {
+    static func visible(micStarting: Bool, status: DictationSession.Status, pending: Bool, message: Bool) -> Bool {
+        micStarting || status == .recording || status == .transcribing || pending || message
+    }
+
+    /// Un aviso pasajero solo ocupa el título cuando no hay nada más importante que mostrar.
+    static func showsMessage(micStarting: Bool, status: DictationSession.Status, pending: Bool, message: Bool) -> Bool {
+        message && !pending && !micStarting && status != .recording && status != .transcribing
+    }
+
+    /// Modo híbrido, tecla soltada ANTES de que el micrófono alcanzara a abrir: si fue un toque
+    /// corto se sigue grabando (lo cierra el próximo toque); si fue una presión larga, la persona
+    /// ya habló y soltó, así que se cierra. Antes cualquier soltada contaba como toque y la
+    /// cajita quedaba pegada en "Escuchando…".
+    static func keepsRecordingAfterEarlyRelease(heldFor: TimeInterval) -> Bool {
+        heldFor < LoroSettings.HotkeyMode.tapThreshold
+    }
+}
+
 /// Pastilla flotante abajo al centro de la pantalla que muestra el estado mientras grabas.
 /// Es un NSPanel no-activante: aparece sobre cualquier app sin robarle el foco (si le robara
 /// el foco, el ⌘V iría a parar al HUD y no a donde estabas escribiendo).
@@ -10,36 +32,51 @@ import SwiftUI
 @MainActor
 final class HUDController {
     private var panel: NSPanel?
-    private var hideTask: Task<Void, Never>?
+    var demoPanel: NSPanel? { panel }
     /// true mientras nosotros mismos movemos el panel, para no confundirlo con un arrastre.
     private var isPositioning = false
+    /// El usuario agarró la cajita con el mouse. Solo entonces un movimiento se guarda como
+    /// posición elegida: macOS también mueve ventanas por su cuenta (al conectar o sacar un
+    /// monitor) y eso no es una decisión de nadie.
+    private var userDragging = false
+    /// Dónde estaba al agarrarlo: un clic sin mover no cuenta como elegir posición.
+    private var dragStartOrigin: NSPoint?
+    /// Tamaño que pide el contenido, informado por SwiftUI cada vez que cambia.
+    private var contentSize: NSSize?
+    var demoContentSize: NSSize? { contentSize }
     private static let anchorKey = "hudAnchor"
     var isVisible: Bool { panel?.isVisible ?? false }
 
-    func show() {
-        hideTask?.cancel()
-        if panel == nil { panel = makePanel() }
-        position()
-        panel?.orderFrontRegardless()
-    }
-
-    func hide(after delay: Duration = .zero) {
-        hideTask?.cancel()
-        hideTask = Task { [weak self] in
-            if delay > .zero { try? await Task.sleep(for: delay) }
-            guard !Task.isCancelled else { return }
-            self?.panel?.orderOut(nil)
+    /// Engancha el HUD al estado: desde aquí se muestra y se esconde solo.
+    func attach(to state: AppState) {
+        withObservationTracking { _ = state.hudVisible } onChange: { [weak self, weak state] in
+            Task { @MainActor in
+                guard let self, let state else { return }
+                self.sync(with: state)
+                self.attach(to: state)
+            }
         }
     }
 
-    func flash(_ message: String) {
-        show()
-        hide(after: .seconds(2.5))
+    private func sync(with state: AppState) {
+        let want = state.hudVisible
+        guard want != isVisible else { return }
+        if want {
+            if panel == nil { panel = makePanel() }
+            position()
+            panel?.orderFrontRegardless()
+            let f = panel?.frame ?? .zero
+            log.notice("HUD aparece (\(state.hudReason, privacy: .public)) en \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)), pantalla \(self.panel?.screen?.localizedName ?? "?", privacy: .public)")
+        } else {
+            userDragging = false
+            panel?.orderOut(nil)
+            log.notice("HUD se esconde (\(state.hudReason, privacy: .public))")
+        }
     }
 
     private func makePanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 56),
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 56),
             styleMask: [.nonactivatingPanel, .borderless, .hudWindow],
             backing: .buffered, defer: false
         )
@@ -54,11 +91,19 @@ final class HUDController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.hidesOnDeactivate = false
         let host = DraggableHostingView(rootView: AnyView(HUDView().environment(AppState.shared)))
-        host.sizingOptions = [.preferredContentSize]
+        // Sin sizingOptions: el tamaño lo manda `contentSizeChanged`. Con `.preferredContentSize`
+        // el `fittingSize` de la vista daba 0 y el panel se quedaba en 56 pt de alto para siempre,
+        // cortando el texto por arriba y por abajo apenas pasaba de dos líneas.
+        host.sizingOptions = []
         host.onDoubleClick = { [weak self] in self?.resetPosition() }
+        host.onDragStart = { [weak self] in self?.userDragging = true; self?.dragStartOrigin = self?.panel?.frame.origin }
         panel.contentView = host
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: panel, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.saveAnchor() }
+            MainActor.assumeIsolated {
+                self?.saveAnchor()
+                // Botón ya suelto: el arrastre terminó. Lo que se mueva después no lo movió el usuario.
+                if NSEvent.pressedMouseButtons & 1 == 0 { self?.userDragging = false }
+            }
         }
         return panel
     }
@@ -66,7 +111,8 @@ final class HUDController {
     /// Guarda dónde dejó el usuario el HUD, como fracción del área visible de su pantalla:
     /// centro horizontal y borde inferior (el HUD crece hacia arriba desde ahí).
     private func saveAnchor() {
-        guard !isPositioning, let panel, let screen = panel.screen ?? NSScreen.main else { return }
+        guard userDragging, !isPositioning, let panel, panel.frame.origin != dragStartOrigin,
+              let screen = panel.screen ?? NSScreen.main else { return }
         let f = screen.visibleFrame
         let fx = (panel.frame.midX - f.minX) / f.width
         let fy = (panel.frame.minY - f.minY) / f.height
@@ -74,47 +120,88 @@ final class HUDController {
     }
 
     private func resetPosition() {
+        userDragging = false
         UserDefaults.standard.removeObject(forKey: Self.anchorKey)
+        log.notice("HUD: posición devuelta abajo al centro (doble clic)")
         position()
     }
 
-    /// SwiftUI todavía no hizo layout cuando llega el onChange; esperamos un tick.
-    func repositionAfterLayout() {
-        Task { @MainActor in
-            await Task.yield()
-            position()
-        }
+    /// SwiftUI avisa cada vez que el contenido cambia de tamaño (también mientras el efecto de
+    /// máquina de escribir va sumando líneas, que es cuando antes el panel se quedaba corto).
+    func contentSizeChanged(_ size: CGSize) {
+        guard size.width > 1, size.height > 1 else { return }
+        let s = NSSize(width: ceil(size.width), height: ceil(size.height))
+        guard s != contentSize else { return }
+        contentSize = s
+        position()
     }
 
     /// Abajo al centro, o donde el usuario lo dejó. Se llama de nuevo cuando el HUD crece con
     /// el texto en vivo, anclando el borde inferior para que crezca hacia arriba.
     func position() {
-        guard let panel, let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let panel else { return }
+        let size = contentSize ?? panel.frame.size
+        if userDragging {
+            if NSEvent.pressedMouseButtons & 1 != 0 {
+                // Lo están arrastrando ahora mismo: solo cambia el tamaño, sin quitárselo de la mano.
+                let f = panel.frame
+                setFrame(NSRect(x: f.midX - size.width / 2, y: f.minY, width: size.width, height: size.height), in: panel.screen)
+                return
+            }
+            saveAnchor()
+            userDragging = false
+            log.notice("HUD: posición nueva guardada tras arrastrarlo")
+        }
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let f = screen.visibleFrame
-        panel.contentView?.layoutSubtreeIfNeeded()
-        let size = panel.contentView?.fittingSize ?? panel.frame.size
         var x = f.midX - size.width / 2
         var y = f.minY + 28
         if let anchor = UserDefaults.standard.array(forKey: Self.anchorKey) as? [Double], anchor.count == 2 {
             x = f.minX + anchor[0] * f.width - size.width / 2
             y = f.minY + anchor[1] * f.height
         }
-        // Siempre entero dentro de la pantalla, aunque crezca con el texto.
-        x = min(max(x, f.minX), f.maxX - size.width)
-        y = min(max(y, f.minY), f.maxY - size.height)
+        setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), in: screen)
+    }
+
+    /// Siempre entero dentro de la pantalla, aunque crezca con el texto.
+    private func setFrame(_ r: NSRect, in screen: NSScreen?) {
+        guard let panel else { return }
+        var r = r
+        if let f = (screen ?? NSScreen.main)?.visibleFrame {
+            r.origin.x = min(max(r.minX, f.minX), max(f.minX, f.maxX - r.width))
+            r.origin.y = min(max(r.minY, f.minY), max(f.minY, f.maxY - r.height))
+        }
+        guard r != panel.frame else { return }
         isPositioning = true
-        panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        panel.setFrame(r, display: true)
         isPositioning = false
+    }
+}
+
+// MARK: - Modo de prueba (HUDDemo)
+extension HUDController {
+    /// Alto que pide el contenido menos alto del panel. 0 = calzan.
+    func demoMismatch() -> CGFloat? {
+        guard let panel = demoPanel else { return nil }
+        return (demoContentSize?.height ?? 0) - panel.frame.height
+    }
+    /// Lo que se ve dentro del panel, tal cual, a un PNG.
+    func demoSnapshot(to url: URL) {
+        guard let v = demoPanel?.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
     }
 }
 
 /// NSHostingView que deja arrastrar la ventana desde cualquier punto y avisa del doble clic.
 final class DraggableHostingView: NSHostingView<AnyView> {
     var onDoubleClick: (() -> Void)?
+    var onDragStart: (() -> Void)?
     override var mouseDownCanMoveWindow: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 { onDoubleClick?(); return }
+        onDragStart?()
         window?.performDrag(with: event)
     }
 }
@@ -125,7 +212,7 @@ struct HUDView: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             statusColumn
-                .frame(width: state.pendingText != nil ? 230 : 150, alignment: .leading)
+                .frame(width: state.pendingText != nil || showsMessage ? 230 : 150, alignment: .leading)
             if !state.liveText.isEmpty {
                 Rectangle().fill(.secondary.opacity(0.25)).frame(width: 1).padding(.vertical, 4)
                 TypewriterText(committed: state.liveCommitted, volatile: state.liveVolatile)
@@ -148,10 +235,26 @@ struct HUDView: View {
         .frame(minHeight: 56)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.12)))
-        .animation(.easeOut(duration: 0.15), value: state.liveText.isEmpty)
-        .onChange(of: state.liveText) { _, _ in state.hud.repositionAfterLayout() }
-        .onChange(of: state.status) { _, _ in state.hud.repositionAfterLayout() }
-        .onChange(of: state.pendingText) { _, _ in state.hud.repositionAfterLayout() }
+        // El panel copia el tamaño real del contenido, sea cual sea la razón por la que cambió.
+        // (Sin animar el ancho: el panel salta de tamaño de una vez y el contenido animado quedaba
+        // cortado durante la transición.)
+        // `fixedSize`: la vista mide lo que necesita aunque el panel todavía sea más chico. Sin
+        // esto SwiftUI informa el alto del panel (56) y el panel nunca se entera de que falta.
+        .fixedSize()
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+            Task { @MainActor in state.hud.contentSizeChanged(size) }
+        }
+    }
+
+    private var showsMessage: Bool {
+        HUDRule.showsMessage(micStarting: state.micStarting, status: state.status, pending: state.pendingText != nil, message: state.hudMessage != nil)
+    }
+
+    private var title: String {
+        if state.pendingText != nil { return "Listo · Enter para pegar" }
+        if state.micStarting { return "Conectando micrófono…" }
+        if showsMessage, let m = state.hudMessage { return m }
+        return state.status.label
     }
 
     /// 420 caracteres ≈ 8 líneas en el ancho del HUD. Antes eran 700, que son ~14 líneas:
@@ -182,8 +285,11 @@ struct HUDView: View {
                 icon.foregroundStyle(color).font(.system(size: 14, weight: .semibold))
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(state.pendingText != nil ? "Listo · Enter para pegar" : (state.micStarting ? "Conectando micrófono…" : state.status.label)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                if state.status == .recording { LevelBars(level: state.level, tint: color) }
+                // Un aviso (o un error) puede ser una frase: hasta 3 líneas en vez de cortarlo con "…".
+                Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(showsMessage ? 3 : 1)
+                    .fixedSize(horizontal: false, vertical: true)
+                if showsMessage { EmptyView() }
+                else if state.status == .recording { LevelBars(level: state.level, tint: color) }
                 else if state.liveText.isEmpty { Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
             }
         }

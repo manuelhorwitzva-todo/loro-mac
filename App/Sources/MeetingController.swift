@@ -114,7 +114,7 @@ final class MeetingController {
                 MeetingStore.save(m)
                 meetings = MeetingStore.load()
                 phase = .idle
-                AppState.shared.hud.flash("Reunión guardada")
+                AppState.shared.flash("Reunión guardada")
                 enqueuePostProcessing(m)
             } catch {
                 phase = .error("No se pudo guardar: \(error.localizedDescription)")
